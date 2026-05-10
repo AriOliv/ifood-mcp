@@ -280,4 +280,4 @@ Released under the [MIT License](LICENSE).
 
 ---
 
-Made with ❤️ in Brazil. Inspired by [avenia-mcp](https://github.com/blindpaylabs/blindpay-mcp) and the broader MCP ecosystem.
+Made by Ari and Claude.
