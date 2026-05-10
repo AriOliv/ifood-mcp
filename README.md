@@ -280,4 +280,4 @@ Released under the [MIT License](LICENSE).
 
 ---
 
-Made by Ari and Claude.
+Made by Ari and Claude a.k.a Claudão.
