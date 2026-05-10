@@ -1,0 +1,70 @@
+{
+  "name": "@aol/ifood-mcp",
+  "version": "1.0.0",
+  "description": "Unofficial Model Context Protocol server for iFood — browse restaurants, search food, manage cart and place orders via AI.",
+  "type": "module",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "bin": {
+    "ifood-mcp": "./build/index.js"
+  },
+  "files": [
+    "build/**",
+    "assets/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "import": "./build/index.js"
+    }
+  },
+  "scripts": {
+    "start": "node build/index.js",
+    "start:http": "node build/http-server.js",
+    "dev": "tsx watch src/http-server.ts",
+    "dev:stdio": "tsx watch src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ifood",
+    "ai",
+    "claude",
+    "anthropic",
+    "oauth",
+    "delivery",
+    "food",
+    "brazil"
+  ],
+  "author": "Ari Oliveira",
+  "license": "MIT",
+  "homepage": "https://github.com/AriOliv/ifood-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AriOliv/ifood-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/AriOliv/ifood-mcp/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.0",
+    "axios": "^1.9.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "jose": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.15.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.8.3"
+  }
+}
