@@ -35,6 +35,8 @@ export type ProviderConfig = {
   refreshTokenTtlSec?: number;
 };
 
+const SUPPORTED_SCOPES = ["mcp:tools"];
+
 export class iFoodOAuthProvider implements OAuthServerProvider {
   readonly clientsStore = new InMemoryClientsStore();
   readonly pending = new PendingAuthStore();
@@ -55,7 +57,7 @@ export class iFoodOAuthProvider implements OAuthServerProvider {
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       state: params.state,
-      scopes: params.scopes ?? [],
+      scopes: (params.scopes ?? []).filter((s) => SUPPORTED_SCOPES.includes(s)),
       codeChallenge: params.codeChallenge,
       resource: params.resource?.href,
     });
@@ -89,7 +91,8 @@ export class iFoodOAuthProvider implements OAuthServerProvider {
     const ac = this.codes.take(authorizationCode);
     if (!ac) throw new InvalidGrantError("authorization code is invalid or expired");
     if (ac.clientId !== client.client_id) throw new InvalidGrantError("client_id mismatch");
-    if (redirectUri && ac.redirectUri !== redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
+    // RFC 6749 §4.1.3 / OAuth 2.1: redirect_uri is mandatory and must match the authorize request.
+    if (!redirectUri || ac.redirectUri !== redirectUri) throw new InvalidGrantError("redirect_uri mismatch");
     if (resource && ac.resource && ac.resource !== resource.href) {
       throw new InvalidGrantError("resource mismatch");
     }
@@ -120,6 +123,11 @@ export class iFoodOAuthProvider implements OAuthServerProvider {
       throw new InvalidGrantError("downstream session expired; re-authenticate via the login page");
     }
 
+    // RFC 6749 §6: a refresh request may only narrow the original scope.
+    if (scopes && scopes.some((s) => !rec.scopes.includes(s))) {
+      throw new InvalidGrantError("requested scope exceeds the original grant");
+    }
+
     return this.issueTokens({
       clientId: client.client_id,
       userSub: rec.userSub,
@@ -135,6 +143,9 @@ export class iFoodOAuthProvider implements OAuthServerProvider {
       const { payload } = await jwtVerify(token, this.cfg.jwtSecret, {
         issuer: this.cfg.issuerUrl.href,
         audience: this.cfg.resourceUrl.href,
+        algorithms: ["HS256"],
+        typ: "at+jwt",
+        requiredClaims: ["sub", "exp"],
       });
       const scopes =
         typeof payload.scope === "string" ? payload.scope.split(" ").filter(Boolean) : [];
@@ -154,12 +165,15 @@ export class iFoodOAuthProvider implements OAuthServerProvider {
   /* ------------------------------ revoke ---------------------------- */
 
   async revokeToken(
-    _client: OAuthClientInformationFull,
+    client: OAuthClientInformationFull,
     request: OAuthTokenRevocationRequest
   ): Promise<void> {
-    if (request.token_type_hint === "refresh_token" || !request.token_type_hint) {
-      this.refreshTokens.take(request.token);
-    }
+    // RFC 7009: only the client the token was issued to may revoke it; unknown tokens are a silent no-op.
+    const rec = this.refreshTokens.peek(request.token);
+    if (!rec || rec.clientId !== client.client_id) return;
+    this.refreshTokens.take(request.token);
+    // Last MCP grant for this user gone → drop the stored iFood credentials too.
+    if (!this.refreshTokens.hasForUser(rec.userSub)) this.userTokens.delete(rec.userSub);
   }
 
   /* ---------------------------- internals --------------------------- */

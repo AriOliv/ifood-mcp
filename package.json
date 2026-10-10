@@ -27,7 +27,9 @@
     "dev:stdio": "tsx watch src/index.ts",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "tsx --test test/*.test.ts",
+    "audit": "npm audit --audit-level=high"
   },
   "keywords": [
     "mcp",

@@ -5,7 +5,7 @@
  * back to the store.
  */
 
-import axios from "axios";
+import { assertIfoodUrl, ifoodHttp } from "../security.js";
 
 import type { TokenProvider } from "../index.js";
 import { MAIN_URL } from "../index.js";
@@ -26,8 +26,10 @@ function expired(token: string, marginSec = 30): boolean {
   return Date.now() / 1000 >= jwtExp(token) - marginSec;
 }
 
-const REFRESH_URL =
-  process.env.IFOOD_REFRESH_URL || `${MAIN_URL}/v1/auth/token`;
+const REFRESH_URL = assertIfoodUrl(
+  "IFOOD_REFRESH_URL",
+  process.env.IFOOD_REFRESH_URL || `${MAIN_URL}/v1/auth/token`
+);
 
 export class SessionTokenProvider implements TokenProvider {
   constructor(
@@ -40,18 +42,18 @@ export class SessionTokenProvider implements TokenProvider {
     if (!pair?.refreshToken || expired(pair.refreshToken)) return null;
 
     try {
-      const res = await axios.post(
+      const res = await ifoodHttp.post(
         REFRESH_URL,
         { refreshToken: pair.refreshToken, grantType: "refresh_token" },
         { headers: { "content-type": "application/json" } }
       );
       const newAccess = res.data?.accessToken || res.data?.access_token;
       const newRefresh = res.data?.refreshToken || res.data?.refresh_token;
-      if (newAccess) {
+      if (typeof newAccess === "string" && newAccess) {
         this.store.set(this.userSub, {
           ...pair,
           accessToken: newAccess,
-          refreshToken: newRefresh || pair.refreshToken,
+          refreshToken: typeof newRefresh === "string" && newRefresh ? newRefresh : pair.refreshToken,
         });
         return newAccess;
       }

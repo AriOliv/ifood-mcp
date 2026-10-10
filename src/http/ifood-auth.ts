@@ -13,7 +13,7 @@
  * later used on API calls.
  */
 
-import axios from "axios";
+import { ifoodHttp } from "../security.js";
 import { MAIN_URL } from "../index.js";
 
 const TENANT_ID = "IFO";
@@ -60,7 +60,7 @@ export async function requestOtpCode(opts: {
   if (opts.email) body.email = opts.email;
   if (opts.phone) body.phone = opts.phone;
 
-  const res = await axios.post(
+  const res = await ifoodHttp.post(
     `${MAIN_URL}/v2/identity-providers/OTP/authorization-codes`,
     body,
     { headers: SHARED_HEADERS(opts.deviceId, opts.sessionId) }
@@ -78,7 +78,7 @@ export async function exchangeOtpCode(opts: {
   deviceId: string;
   sessionId: string;
 }): Promise<{ otpToken: string }> {
-  const res = await axios.post(
+  const res = await ifoodHttp.post(
     `${MAIN_URL}/v2/identity-providers/OTP/access-tokens`,
     { key: opts.key, auth_code: opts.authCode },
     { headers: SHARED_HEADERS(opts.deviceId, opts.sessionId) }
@@ -92,7 +92,7 @@ export async function lookupChallengeEmail(opts: {
   deviceId: string;
   sessionId: string;
 }): Promise<{ email: string }> {
-  const res = await axios.post(
+  const res = await ifoodHttp.post(
     `${MAIN_URL}/v1/identity-providers/OTP/challenges`,
     { token: opts.otpToken, tenant: TENANT_ID },
     { headers: SHARED_HEADERS(opts.deviceId, opts.sessionId) }
@@ -111,7 +111,7 @@ export async function authenticateOtp(opts: {
   refreshToken: string;
   accountId: string;
 }> {
-  const res = await axios.post(
+  const res = await ifoodHttp.post(
     `${MAIN_URL}/v3/identity-providers/OTP/authentications`,
     {
       tenant_id: TENANT_ID,

@@ -261,10 +261,12 @@ src/
 
 ## Security & Disclaimer
 
-- 🔒 In HTTP mode, iFood tokens live only in memory — never written to disk. Process restart = re‑login.
+- 📄 See [SECURITY.md](SECURITY.md) for the security audit, hardening applied and operator guidance.
+
+- 🔒 In HTTP mode, iFood tokens live only in memory — never written to disk. Process restart = re‑login. (In stdio mode a refreshed token may be cached in `~/.ifood-tokens.json`, created with `0600`.)
 - 🚫 Don't commit `.env`, HAR files or any DevTools captures — they contain bearer tokens. The `.gitignore` blocks all common spots.
 - ⚠️ **Unofficial**. iFood does not publish a public API. This wraps the consumer website's endpoints, which can change without notice. Use at your own discretion and respect [iFood's Terms of Service](https://www.ifood.com.br/termos-e-politicas).
-- 🛡️ The login flow may eventually trip iFood's bot‑detection. If you see opaque errors during login, try the `/login/paste` fallback to provide tokens manually.
+- 🛡️ The login flow may eventually trip iFood's bot‑detection. If you see opaque errors during login, you can enable the `/login/paste` fallback with `ENABLE_TOKEN_PASTE=1` (disabled by default; the token is verified against iFood before being accepted).
 
 ## Contributing
 

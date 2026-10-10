@@ -11,6 +11,7 @@
  * who already have JWTs extracted from browser DevTools.
  */
 
+import { createHash } from "crypto";
 import { Router } from "express";
 import type { iFoodOAuthProvider } from "./provider.js";
 import {
@@ -22,6 +23,8 @@ import {
   type OtpChannel,
   type Phone,
 } from "./ifood-auth.js";
+import { MAIN_URL, getDefaultHeaders } from "../index.js";
+import { RateLimiter, redactSecrets, ifoodHttp } from "../security.js";
 
 const STYLE = `
   :root {
@@ -227,20 +230,69 @@ function isPhoneInput(s: string): boolean {
   return /\d/.test(s) && !s.includes("@");
 }
 
-function redirectWithError(
-  flowId: string,
-  message: string,
-  step: "start" | "verify" | "email" = "start"
-): string {
-  const path = step === "start" ? "/login" : `/login/${step}`;
-  return `${path}?authFlow=${encodeURIComponent(flowId)}&error=${encodeURIComponent(message)}`;
+type Step = "start" | "verify" | "email" | "paste";
+
+/** CSP for the login pages: no external resources; the single inline script is pinned by hash. */
+const SCRIPT_HASH = createHash("sha256").update(SCRIPT).digest("base64");
+const LOGIN_CSP = [
+  "default-src 'none'",
+  `script-src 'sha256-${SCRIPT_HASH}'`,
+  "style-src 'unsafe-inline'",
+  "img-src data:",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  // no form-action: the final 302 goes to the client's registered redirect_uri
+].join("; ");
+
+const MAX_OTP_SENDS_PER_FLOW = 3;
+const MAX_VERIFY_ATTEMPTS_PER_FLOW = 5;
+const TOKEN_PASTE_ENABLED = process.env.ENABLE_TOKEN_PASTE === "1";
+
+function redirectLabel(uri: string): string {
+  try {
+    const u = new URL(uri);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.host : `${u.protocol}//`;
+  } catch {
+    return "?";
+  }
 }
 
 export function createLoginRouter(provider: iFoodOAuthProvider): Router {
   const router = Router();
 
-  // Dev-only preview route
-  if (process.env.NODE_ENV !== "production") {
+  router.use((req, res, next) => {
+    if (req.path.startsWith("/login")) {
+      res.setHeader("Content-Security-Policy", LOGIN_CSP);
+      res.setHeader("Cache-Control", "no-store");
+    }
+    next();
+  });
+
+  // Per-IP throttle for state-changing login calls; OTP delivery is an SMS/e-mail bombing vector.
+  const loginLimiter = new RateLimiter(20, 10 * 60_000);
+  router.post("/login/*", (req, res, next) => {
+    if (!loginLimiter.take(req.ip ?? "unknown")) {
+      res.status(429).send("Too many attempts. Try again later.");
+      return;
+    }
+    next();
+  });
+
+  /** Keep error text server-side (not in the URL) so crafted links cannot inject page content. */
+  function fail(res: { redirect(status: number, url: string): void }, flowId: string, message: string, step: Step = "start"): void {
+    provider.pending.update(flowId, { flashError: message });
+    const path = step === "start" ? "/login" : `/login/${step}`;
+    res.redirect(302, `${path}?authFlow=${encodeURIComponent(flowId)}`);
+  }
+
+  function takeFlash(flow: { flowId: string; flashError?: string }): string {
+    const e = flow.flashError ?? "";
+    if (e) provider.pending.update(flow.flowId, { flashError: undefined });
+    return e;
+  }
+
+  // Dev-only preview route — explicit opt-in, never in production.
+  if (process.env.NODE_ENV !== "production" && process.env.ENABLE_LOGIN_PREVIEW === "1") {
     router.get("/login/preview", (_req, res) => {
       const flow = provider.pending.create({
         clientId: "preview-client",
@@ -266,12 +318,14 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       return;
     }
 
-    const err = typeof req.query.error === "string" ? req.query.error : "";
+    const err = takeFlash(flow);
 
     res.send(
       page(`
         <h1>Conectar ao iFood</h1>
-        <p class="sub">Autorize <strong>${escapeHtml(flow.clientId)}</strong> a acessar sua conta iFood.</p>
+        <p class="sub">Autorize o aplicativo <strong>${escapeHtml(flow.clientId)}</strong> (retorno para <span class="echo">${escapeHtml(
+          redirectLabel(flow.redirectUri)
+        )}</span>) a acessar sua conta iFood. Só continue se você iniciou esta conexão.</p>
 
         ${err ? alertBox("error", err) : ""}
 
@@ -300,7 +354,11 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
           </button>
         </form>
 
-        <a class="footer-link" href="/login/paste?authFlow=${escapeHtml(flow.flowId)}">já tenho os tokens (avançado)</a>`)
+        ${
+          TOKEN_PASTE_ENABLED
+            ? `<a class="footer-link" href="/login/paste?authFlow=${escapeHtml(flow.flowId)}">já tenho os tokens (avançado)</a>`
+            : ""
+        }`)
     );
   });
 
@@ -319,12 +377,16 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
     }
 
     const trimmed = identifier.trim();
+    if (trimmed.length > 254) {
+      fail(res, authFlow, "Identificador muito longo.");
+      return;
+    }
     if (!trimmed) {
-      res.redirect(302, redirectWithError(authFlow, "Informe seu e-mail ou telefone."));
+      fail(res, authFlow, "Informe seu e-mail ou telefone.");
       return;
     }
     if (!["EMAIL", "SMS", "WHATSAPP"].includes(channel)) {
-      res.redirect(302, redirectWithError(authFlow, "Canal de OTP inválido."));
+      fail(res, authFlow, "Canal de OTP inválido.");
       return;
     }
 
@@ -333,26 +395,32 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
     if (isPhoneInput(trimmed)) {
       const parsed = parsePhoneBR(trimmed);
       if (!parsed) {
-        res.redirect(302, redirectWithError(authFlow, "Telefone inválido. Use formato BR, ex: (11) 99999-0000."));
+        fail(res, authFlow, "Telefone inválido. Use formato BR, ex: (11) 99999-0000.");
         return;
       }
       phone = parsed;
     } else {
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-        res.redirect(302, redirectWithError(authFlow, "E-mail inválido."));
+        fail(res, authFlow, "E-mail inválido.");
         return;
       }
       email = trimmed.toLowerCase();
     }
 
     if (channel === "EMAIL" && !email) {
-      res.redirect(302, redirectWithError(authFlow, "Para canal E-mail, informe um e-mail."));
+      fail(res, authFlow, "Para canal E-mail, informe um e-mail.");
       return;
     }
     if (channel !== "EMAIL" && !phone) {
-      res.redirect(302, redirectWithError(authFlow, "Para canal SMS/WhatsApp, informe um telefone."));
+      fail(res, authFlow, "Para canal SMS/WhatsApp, informe um telefone.");
       return;
     }
+
+    if ((flow.sends ?? 0) >= MAX_OTP_SENDS_PER_FLOW) {
+      fail(res, authFlow, "Limite de envios de código atingido. Reinicie a conexão pelo seu cliente MCP.");
+      return;
+    }
+    provider.pending.update(authFlow, { sends: (flow.sends ?? 0) + 1 });
 
     try {
       const { key } = await requestOtpCode({
@@ -370,8 +438,8 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       });
       res.redirect(302, `/login/verify?authFlow=${encodeURIComponent(authFlow)}`);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "falha ao enviar código";
-      res.redirect(302, redirectWithError(authFlow, `iFood: ${msg}`));
+      console.error(`[login] send OTP failed: ${redactSecrets(err instanceof Error ? err.message : err, 120)}`);
+      fail(res, authFlow, "Não foi possível enviar o código. Verifique os dados e tente novamente.");
     }
   });
 
@@ -384,7 +452,7 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       res.redirect(302, `/login?authFlow=${encodeURIComponent(flowId)}`);
       return;
     }
-    const err = typeof req.query.error === "string" ? req.query.error : "";
+    const err = takeFlash(flow);
 
     res.send(
       page(`
@@ -427,9 +495,16 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       return;
     }
 
+    if ((flow.attempts ?? 0) >= MAX_VERIFY_ATTEMPTS_PER_FLOW) {
+      provider.pending.delete(authFlow);
+      res.status(429).send("Too many attempts. Restart the connection from your MCP client.");
+      return;
+    }
+    provider.pending.update(authFlow, { attempts: (flow.attempts ?? 0) + 1 });
+
     const code = authCode.replace(/\D/g, "");
     if (code.length !== 6) {
-      res.redirect(302, redirectWithError(authFlow, "Código deve ter 6 dígitos.", "verify"));
+      fail(res, authFlow, "Código deve ter 6 dígitos.", "verify");
       return;
     }
 
@@ -464,8 +539,8 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
 
       await completeAuthentication(res, authFlow, flow, otpToken, email);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "falha na verificação";
-      res.redirect(302, redirectWithError(authFlow, `iFood: ${msg}`, "verify"));
+      console.error(`[login] verify failed: ${redactSecrets(err instanceof Error ? err.message : err, 120)}`);
+      fail(res, authFlow, "Código inválido ou expirado. Tente novamente.", "verify");
     }
   });
 
@@ -478,7 +553,7 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       res.redirect(302, `/login?authFlow=${encodeURIComponent(flowId)}`);
       return;
     }
-    const err = typeof req.query.error === "string" ? req.query.error : "";
+    const err = takeFlash(flow);
     const masked = flow.maskedEmail ?? "";
 
     res.send(
@@ -519,17 +594,23 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       res.redirect(302, `/login?authFlow=${encodeURIComponent(authFlow)}`);
       return;
     }
+    if ((flow.attempts ?? 0) >= MAX_VERIFY_ATTEMPTS_PER_FLOW) {
+      provider.pending.delete(authFlow);
+      res.status(429).send("Too many attempts. Restart the connection from your MCP client.");
+      return;
+    }
+    provider.pending.update(authFlow, { attempts: (flow.attempts ?? 0) + 1 });
     const trimmed = email.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
-      res.redirect(302, redirectWithError(authFlow, "E-mail inválido.", "email"));
+      fail(res, authFlow, "E-mail inválido.", "email");
       return;
     }
 
     try {
       await completeAuthentication(res, authFlow, flow, flow.otpToken, trimmed);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "falha na verificação";
-      res.redirect(302, redirectWithError(authFlow, `iFood: ${msg}`, "email"));
+      console.error(`[login] email step failed: ${redactSecrets(err instanceof Error ? err.message : err, 120)}`);
+      fail(res, authFlow, "Não foi possível concluir o login. Confira o e-mail e tente novamente.", "email");
     }
   });
 
@@ -578,13 +659,17 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
   /* ---------------- fallback: paste tokens (advanced) ---------------- */
 
   router.get("/login/paste", (req, res) => {
+    if (!TOKEN_PASTE_ENABLED) {
+      res.status(404).send("Not found");
+      return;
+    }
     const flowId = typeof req.query.authFlow === "string" ? req.query.authFlow : "";
     const flow = flowId ? provider.pending.get(flowId) : undefined;
     if (!flow) {
       res.status(400).send(page(`<h1>Link expirado</h1><p class="sub">Reconecte e tente novamente.</p>`));
       return;
     }
-    const err = typeof req.query.error === "string" ? req.query.error : "";
+    const err = takeFlash(flow);
 
     res.send(
       page(`
@@ -613,7 +698,11 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
     );
   });
 
-  router.post("/login/paste", (req, res) => {
+  router.post("/login/paste", async (req, res) => {
+    if (!TOKEN_PASTE_ENABLED) {
+      res.status(404).send("Not found");
+      return;
+    }
     const { authFlow, accessToken, refreshToken } = req.body ?? {};
     if (typeof authFlow !== "string" || typeof accessToken !== "string") {
       res.status(400).send("missing fields");
@@ -624,30 +713,41 @@ export function createLoginRouter(provider: iFoodOAuthProvider): Router {
       res.status(400).send("flow expired");
       return;
     }
+    if ((flow.attempts ?? 0) >= MAX_VERIFY_ATTEMPTS_PER_FLOW) {
+      provider.pending.delete(authFlow);
+      res.status(429).send("Too many attempts. Restart the connection from your MCP client.");
+      return;
+    }
+    provider.pending.update(authFlow, { attempts: (flow.attempts ?? 0) + 1 });
 
     const token = accessToken.trim().replace(/^Bearer\s+/i, "");
-    if (!token) {
-      res.redirect(
-        302,
-        `/login/paste?authFlow=${encodeURIComponent(authFlow)}&error=${encodeURIComponent("Access token vazio.")}`
-      );
+    if (!token || token.length > 8192 || (typeof refreshToken === "string" && refreshToken.length > 8192)) {
+      fail(res, authFlow, "Access token vazio ou grande demais.", "paste");
       return;
     }
 
     const { sub, exp } = decodeJwtPayload(token);
     if (!sub) {
-      res.redirect(
-        302,
-        `/login/paste?authFlow=${encodeURIComponent(authFlow)}&error=${encodeURIComponent("Token inválido — campo 'sub' ausente.")}`
-      );
+      fail(res, authFlow, "Token inválido — campo 'sub' ausente.", "paste");
       return;
     }
     const nowSec = Math.floor(Date.now() / 1000);
     if (exp && exp < nowSec) {
-      res.redirect(
-        302,
-        `/login/paste?authFlow=${encodeURIComponent(authFlow)}&error=${encodeURIComponent("Access token expirado.")}`
-      );
+      fail(res, authFlow, "Access token expirado.", "paste");
+      return;
+    }
+
+    // The JWT cannot be verified locally (iFood's key is not ours), so a forged token with a victim's
+    // `sub` could overwrite that victim's stored session. Prove authenticity by calling iFood with it.
+    try {
+      await ifoodHttp.get(`${MAIN_URL}/v1/customers/me`, {
+        headers: {
+          ...getDefaultHeaders({ accountId: sub, deviceId: flow.deviceId, sessionId: flow.sessionId }),
+          authorization: `Bearer ${token}`,
+        },
+      });
+    } catch {
+      fail(res, authFlow, "O iFood não aceitou este token.", "paste");
       return;
     }
 
