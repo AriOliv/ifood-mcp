@@ -1,0 +1,8 @@
+node_modules
+build
+.git
+.env
+.env.*
+*.har
+requests
+assets
