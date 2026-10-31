@@ -1,3 +1,5 @@
+
+
 # iFood MCP Server <img src="assets/logo.png" align="right" width="102"/>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -109,7 +111,7 @@ Extract your iFood credentials from browser DevTools:
 
 ```bash
 cp .env.example .env
-# fill in IFOOD_ACCESS_TOKEN, IFOOD_ACCOUNT_ID, IFOOD_DEVICE_ID, IFOOD_SESSION_ID
+# fill in IFOOD_ACCESS_TOKEN, IFOOD_REFRESH_TOKEN, IFOOD_ACCOUNT_ID, IFOOD_DEVICE_ID, IFOOD_SESSION_ID
 ```
 
 ##### Claude Desktop
